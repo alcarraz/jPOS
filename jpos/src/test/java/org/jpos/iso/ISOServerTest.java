@@ -323,6 +323,37 @@ public class ISOServerTest {
     }
 
     @Test
+    void deniedClientsDoNotTakeSessionPermits() throws Exception {
+        int port;
+        try (ServerSocket probe = new ServerSocket(0)) {
+            port = probe.getLocalPort();
+        }
+
+        CSChannel channel = new CSChannel();
+        channel.setPackager(new ISO87BPackager());
+        ISOServer server = new ISOServer(port, channel, 1);
+        server.setLogger(new Logger(), "ISOServerTest");
+        SimpleConfiguration cfg = new SimpleConfiguration();
+        cfg.put("deny", "127.0.0.1");
+        server.setConfiguration(cfg);
+
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        executor.submit(server);
+        try (Socket denied = connect(port, 5000L)) {
+            long deadline = System.currentTimeMillis() + 5000L;
+            while (server.getConnections() == 0 && System.currentTimeMillis() < deadline)
+                ISOUtil.sleep(10L);
+            assertEquals(1, server.getConnections(), "the denied client should have been accepted");
+            ISOUtil.sleep(200L); // let the accept loop settle, well within the denial delay
+            assertEquals(0, server.getActiveConnections(), "a denied client should not hold a session permit");
+            new Socket("127.0.0.1", port).close(); // still listening while the denied client is delayed
+        } finally {
+            server.shutdown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
     void wildcardAllowGrantsMatchingClient() throws Exception {
         int port;
         try (ServerSocket probe = new ServerSocket(0)) {

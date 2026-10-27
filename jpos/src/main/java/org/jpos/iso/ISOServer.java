@@ -447,65 +447,77 @@ public class ISOServer extends Observable
             }
             return false;
         }
-
-        private void checkPermission0 (Socket socket, LogEvent evt) throws ISOException {
-            // if there are no allow/deny params, just return without doing any checks
-            // (i.e.: "silent allow policy", keeping backward compatibility)
-            if (specificIPPerms.isEmpty() && wildcardAllow == null && wildcardDeny == null)
-                return;
-
-            String ip= socket.getInetAddress().getHostAddress ();           // The remote IP
-
-            // first, check allows or denies for specific/whole IPs (no wildcards)
-            Boolean specificAllow = specificIPPerms.get(ip);
-            if (specificAllow == Boolean.TRUE) {                            // specific IP allow
-                evt.addMessage("access granted, ip=" + ip);
-                return;
-            } else if (specificAllow == Boolean.FALSE) {                    // specific IP deny
-                throw new ISOException("access denied, ip=" + ip);
-            } else {                                                        // no specific match under the specificIPPerms Map
-                // We check the wildcard lists, deny first
-                if (wildcardDeny != null) {
-                    for (String wdeny : wildcardDeny) {
-                        if (ip.startsWith(wdeny)) {
-                            throw new ISOException ("access denied, ip=" + ip);
-                        }
-                    }
-                }
-                if (wildcardAllow != null) {
-                    for (String wallow : wildcardAllow) {
-                        if (ip.startsWith(wallow)) {
-                            evt.addMessage("access granted, ip=" + ip);
-                            return;
-                        }
-                    }
-                }
-
-                // Reaching this point means that nothing matched our specific or wildcard rules, so we fall
-                // back on the default permission policies and log type
-                switch (ipPermLogPolicy) {
-                    case DENY_LOG:        // only allows were specified, default policy is to deny non-matches and log the issue
-                        throw new ISOException ("access denied, ip=" + ip);
-                        // break;
-
-                    case ALLOW_LOG:       // only denies were specified, default policy is to allow non-matches and log the issue
-                        evt.addMessage("access granted, ip=" + ip);
-                        break;
-
-                    case DENY_LOGWARNING: // mix of allows and denies were specified, but the IP matched no rules!
-                                          // so we adopt a deny policy but give a special warning
-                        throw new ISOException ("access denied, ip=" + ip + " (WARNING: the IP did not match any rules!)");
-                        // break;
-
-                    case ALLOW_NOLOG:   // this is the default case when no allow/deny are specified
-                                        // the method will abort early on the first "if", so this is here just for completion
-                        break;
-                }
-
-            }
-            // we should never reach this point!! :-)
-        }
     } // inner class Session
+
+    private void checkPermission0 (Socket socket, LogEvent evt) throws ISOException {
+        // if there are no allow/deny params, just return without doing any checks
+        // (i.e.: "silent allow policy", keeping backward compatibility)
+        if (specificIPPerms.isEmpty() && wildcardAllow == null && wildcardDeny == null)
+            return;
+
+        String ip= socket.getInetAddress().getHostAddress ();           // The remote IP
+
+        // first, check allows or denies for specific/whole IPs (no wildcards)
+        Boolean specificAllow = specificIPPerms.get(ip);
+        if (specificAllow == Boolean.TRUE) {                            // specific IP allow
+            evt.addMessage("access granted, ip=" + ip);
+            return;
+        } else if (specificAllow == Boolean.FALSE) {                    // specific IP deny
+            throw new ISOException("access denied, ip=" + ip);
+        } else {                                                        // no specific match under the specificIPPerms Map
+            // We check the wildcard lists, deny first
+            if (wildcardDeny != null) {
+                for (String wdeny : wildcardDeny) {
+                    if (ip.startsWith(wdeny)) {
+                        throw new ISOException ("access denied, ip=" + ip);
+                    }
+                }
+            }
+            if (wildcardAllow != null) {
+                for (String wallow : wildcardAllow) {
+                    if (ip.startsWith(wallow)) {
+                        evt.addMessage("access granted, ip=" + ip);
+                        return;
+                    }
+                }
+            }
+
+            // Reaching this point means that nothing matched our specific or wildcard rules, so we fall
+            // back on the default permission policies and log type
+            switch (ipPermLogPolicy) {
+                case DENY_LOG:        // only allows were specified, default policy is to deny non-matches and log the issue
+                    throw new ISOException ("access denied, ip=" + ip);
+                    // break;
+
+                case ALLOW_LOG:       // only denies were specified, default policy is to allow non-matches and log the issue
+                    evt.addMessage("access granted, ip=" + ip);
+                    break;
+
+                case DENY_LOGWARNING: // mix of allows and denies were specified, but the IP matched no rules!
+                                      // so we adopt a deny policy but give a special warning
+                    throw new ISOException ("access denied, ip=" + ip + " (WARNING: the IP did not match any rules!)");
+                    // break;
+
+                case ALLOW_NOLOG:   // this is the default case when no allow/deny are specified
+                                    // the method will abort early on the first "if", so this is here just for completion
+                    break;
+            }
+
+        }
+        // we should never reach this point!! :-)
+    }
+
+    private boolean isPermitted (ServerChannel channel) {
+        if (!(channel instanceof BaseChannel baseChannel))
+            return true;
+        try {
+            checkPermission0 (baseChannel.getSocket(), new LogEvent());
+            return true;
+        } catch (ISOException e) {
+            return false;
+        }
+    }
+
 
     //-------------------------------------------------------------------------------
     //-- This is the main run for this ISOServer's Thread
@@ -549,19 +561,26 @@ public class ISOServer extends Observable
                         if (connectionCount.getAndIncrement() % 100 == 0) {
                             purgeChannels ();
                         }
+                        // A denied client is held for a random delay before being closed; it must
+                        // not take a session permit meanwhile, or it could keep the server from
+                        // listening for legitimate clients.
+                        final boolean permitted = isPermitted (channel);
                         // Acquired before handing off, so the next pass sees exhausted permits
                         // and stops listening.
-                        permits.acquireUninterruptibly();
+                        if (permitted)
+                            permits.acquireUninterruptibly();
                         try {
                             executor.submit (() -> {
                                 try {
                                     createSession(channel).run();
                                 } finally {
-                                    permits.release();
+                                    if (permitted)
+                                        permits.release();
                                 }
                               });
                         } catch (Throwable t) {
-                            permits.release();
+                            if (permitted)
+                                permits.release();
                             try {
                                 channel.disconnect();
                             } catch (IOException e) {
